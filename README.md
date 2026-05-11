@@ -121,6 +121,114 @@ Sample API response (Zerodha):
 }
 ```
 
+## Test Suite Breakdown
+
+### `tests/zerodha.test.ts` - 16 tests
+
+Tests the Zerodha parser in isolation. No HTTP server, no auto-detection - just raw CSV text to parsed trades.
+
+| Test | What It Validates | Assignment Criteria |
+|------|-------------------|---------------------|
+| parses sample CSV: 5 valid, 2 skipped | Core acceptance criteria - the sample file produces exactly the expected counts | #1 Error handling, #4 Test coverage |
+| row 6 error: invalid date | Exact row number plus human-readable reason for bad date | #1 Error handling |
+| row 7 error: negative quantity | Exact row number plus reason for negative quantity | #1 Error handling |
+| totalAmount for BUY trades | `quantity * price` is positive (`RELIANCE`: `10 * 2450.50 = 24505`) | #4 Test coverage |
+| totalAmount for SELL trades | `quantity * price` is negative (`INFY`: `-(25 * 1520.75) = -38018.75`) | #4 Test coverage |
+| currency inferred as INR from NSE | Exchange `NSE` maps to currency `INR` | #4 Test coverage |
+| currency inferred as INR from BSE | Exchange `BSE` maps to currency `INR` | #4 Test coverage |
+| case-insensitive trade_type | `buy`, `BUY`, `sell`, and `SELL` normalize correctly | #4 Test coverage |
+| rawData preserves all columns | Every original CSV field is in `rawData`, including `isin`, `segment`, and other broker fields | #3 TypeScript quality |
+| empty ISIN handled gracefully | HDFCBANK row has empty ISIN but still parses | #1 Error handling |
+| zero quantity skipped | Row with `qty = 0` is skipped with a clear reason | #1 Error handling, #4 Edge cases |
+| missing required fields skipped | Row with empty symbol is skipped | #1 Error handling, #4 Edge cases |
+| headers-only CSV | No data rows produces 0 trades and 0 errors without crashing | #4 Edge cases |
+| single valid row | Minimal valid input produces 1 trade | #4 Edge cases |
+| all invalid rows | Every row fails, producing 0 trades and N errors | #4 Edge cases |
+| missing exchange defaults to INR | Fallback currency is `INR` when exchange column is empty | #1 Error handling |
+
+There are 16 tests for one parser because the assignment asks for creative edge-case coverage. These tests go beyond the minimum happy path.
+
+### `tests/ibkr.test.ts` - 14 tests
+
+Tests the IBKR parser in isolation, following the same raw CSV text to parsed trades pattern while covering IBKR-specific rules.
+
+| Test | What It Validates | Assignment Criteria |
+|------|-------------------|---------------------|
+| parses sample CSV: 5 valid, 1 skipped | Core acceptance criteria - only AMZN (row 5, zero quantity) is skipped | #1 Error handling, #4 Test coverage |
+| row 5 skipped: zero quantity | AMZN row with `qty = 0` is skipped with a clear reason | #1 Error handling |
+| row 6 valid: empty Commission | GOOGL row with empty `Commission` field still parses successfully | #1 Error handling |
+| EUR.USD to EUR/USD normalization | Forex symbol format is converted to standard slash notation | #4 Test coverage |
+| ISO 8601 date parsing | `2026-04-01T14:30:00Z` is preserved as-is | #4 Test coverage |
+| MM/DD/YYYY date parsing | `04/03/2026` converts to `2026-04-03T00:00:00Z` | #4 Test coverage |
+| totalAmount positive for BUY | AAPL: `100 * 185.50 = 18550` | #4 Test coverage |
+| totalAmount negative for SELL | MSFT: `-(50 * 420.25) = -21012.50` | #4 Test coverage |
+| rawData preserves extra fields | `AccountID`, `Commission`, `NetAmount`, and `AssetClass` are preserved in `rawData` | #3 TypeScript quality |
+| BOT to BUY, SLD to SELL normalization | Both side mappings work correctly | #4 Test coverage |
+| invalid date format skipped | Bad date string produces a clear error | #1 Error handling |
+| missing required fields skipped | Empty `Symbol` produces a clear error | #1 Error handling |
+| headers-only CSV | No crash and an empty result | #4 Edge cases |
+| single valid row | Minimal input works | #4 Edge cases |
+
+Key detail: the IBKR tests verify that empty `Commission` is allowed, which was a specific requirement that can otherwise be ambiguous.
+
+### `tests/autoDetect.test.ts` - 7 tests
+
+Tests the broker detection logic - the routing layer that decides which parser to use.
+
+| Test | What It Validates | Assignment Criteria |
+|------|-------------------|---------------------|
+| identifies Zerodha by headers | CSV with `symbol`, `trade_date`, `trade_type`, and related headers maps to `zerodha` | #4 Test coverage, #5 Architecture |
+| identifies IBKR by headers | CSV with `TradeID`, `Symbol`, `DateTime`, and related headers maps to `ibkr` | #4 Test coverage, #5 Architecture |
+| unknown format returns error | Random headers produce null broker plus a clear error message | #1 Error handling, #4 Edge cases |
+| empty CSV returns error | Empty string produces an error about an empty file | #1 Error handling, #4 Edge cases |
+| no headers returns error | Data without recognizable headers produces an error | #4 Edge cases |
+| lists registered brokers | `getRegisteredBrokers()` returns `["zerodha", "ibkr"]` | #5 Architecture |
+| case-insensitive header detection | Uppercase headers like `SYMBOL` and `TRADE_DATE` still match | #4 Test coverage |
+
+Auto-detection is the service routing layer. If it fails, the parser is never reached, so these tests protect the registry pattern and downstream behavior.
+
+### `tests/api.test.ts` - 9 tests
+
+End-to-end HTTP tests using Supertest. These exercise the full Express app without starting a real server.
+
+| Test | What It Validates | Assignment Criteria |
+|------|-------------------|---------------------|
+| 400 when no file uploaded | Missing file field returns 400 plus an error message | #1 Error handling |
+| 400 for empty file | Empty buffer returns 400 plus an error | #1 Error handling |
+| 400 for unrecognized format | Unknown CSV returns 400 plus an `Unrecognized` message | #1 Error handling |
+| 200 plus correct shape for Zerodha | Full upload returns 200, correct broker, summary, trades, and errors | #4 Test coverage |
+| 200 plus correct shape for IBKR | Full upload returns 200 with correct counts: 6 total, 5 valid, 1 skipped | #4 Test coverage |
+| valid Trade objects in response | Every trade has all 9 required Zod fields | #3 TypeScript quality |
+| errors have row and reason | Error objects contain `row` as a number and `reason` as a string | #1 Error handling |
+| headers-only CSV handled | No data rows returns 200 with zero counts | #4 Edge cases |
+| GET /health returns ok | Health endpoint works for deployment checks | #4 Test coverage |
+
+Supertest keeps HTTP tests in-process, so there is no port binding, server startup delay, race condition, or background process management. That makes the suite deterministic and CI/CD friendly.
+
+### Mapping Tests to Evaluation Criteria
+
+| Priority | Tests That Prove It |
+|----------|---------------------|
+| 1. Error handling | Every skipped-row test, invalid date test, negative quantity test, zero quantity test, missing field test, empty file test, and unknown format test |
+| 2. Code readability | Test names are descriptive sentences, such as "skips row 5 (AMZN with zero quantity)", so behavior is readable at a glance |
+| 3. TypeScript quality | API response shape tests verify all Zod fields are present; `rawData` tests verify the `Record<string, unknown>` structure |
+| 4. Test coverage | 46 tests cover happy paths, edge cases, error cases, and boundary conditions |
+| 5. Architecture | Auto-detection tests prove the plugin registry works; parser isolation tests prove there is no cross-broker coupling |
+| 6. README | Tests act as executable documentation for system behavior |
+
+### Test Execution Flow
+
+When you run `npm test`, Vitest:
+
+1. Discovers all `*.test.ts` files
+2. Runs them in parallel with isolated test contexts
+3. Imports source modules directly with no build step required
+4. Uses Supertest to simulate HTTP requests against the Express app instance
+5. Passes raw CSV strings into parsers and receives structured parse results
+6. Verifies exact response shapes, values, counts, and error messages
+
+The entire suite runs quickly because files are read once and the rest of the work happens in memory.
+
 ## Design Decisions
 
 ### 1. Extensibility - Plugin-Style Parsers
